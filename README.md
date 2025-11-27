@@ -13,7 +13,21 @@
     <a href="https://github.com/blessonism/weread2flomo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/blessonism/weread2flomo" alt="License"/></a>
     <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python"/></a>
     <a href="https://github.com/blessonism/weread2flomo/issues"><img src="https://img.shields.io/github/issues/blessonism/weread2flomo" alt="Issues"/></a>
+    <a href="https://weread2flomo.sukisq.me"><img src="https://img.shields.io/badge/docs-weread2flomo.sukisq.me-blue.svg" alt="Docs"/></a>
 </p>
+
+
+---
+
+## 📸 项目效果图
+
+<div align="center">
+    <!-- 请在此处替换为实际的项目截图 -->
+  <img src="./assets/images/screenshot_1.jpg" alt="功能演示 1" width="800"/>
+    <!-- <br/> -->
+    <!-- <img src="./assets/images/screenshot_2.png" alt="功能演示 2" width="800"/> -->
+
+</div>
 
 ---
 
