@@ -21,6 +21,10 @@
 
 ## 📸 项目效果图
 
+<details>
+<summary><strong>点击查看运行效果</strong></summary>
+<br/>
+
 <div align="center">
     <!-- 请在此处替换为实际的项目截图 -->
   <img src="./assets/images/screenshot_1.jpg" alt="功能演示 1" width="800"/>
@@ -28,6 +32,8 @@
     <!-- <img src="./assets/images/screenshot_2.png" alt="功能演示 2" width="800"/> -->
 
 </div>
+
+</details>
 
 ---
 
