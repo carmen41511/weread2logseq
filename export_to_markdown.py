@@ -113,6 +113,64 @@ class WeReadExporter:
         cleaned = re.sub(r'^\[.*?\]', '', author).strip()
         return cleaned if cleaned else author
 
+    def extract_existing_ids(self, filepath: str) -> tuple:
+        """
+        从现有文件中提取已存在的划线ID和想法ID
+        
+        Returns:
+            (set of 划线id, set of 想法id)
+        """
+        highlight_ids = set()
+        thought_ids = set()
+        
+        if not os.path.exists(filepath):
+            return highlight_ids, thought_ids
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 提取划线ID: 划线id:: xxx
+            for match in re.finditer(r'划线id::\s*(\S+)', content):
+                highlight_ids.add(match.group(1))
+            
+            # 提取想法ID: 想法id:: xxx
+            for match in re.finditer(r'想法id::\s*(\S+)', content):
+                thought_ids.add(match.group(1))
+                
+        except Exception as e:
+            print(f"   ⚠️ 读取现有文件失败: {e}")
+        
+        return highlight_ids, thought_ids
+
+    def find_chapter_insert_position(self, content: str, chapter_name: str) -> int:
+        """
+        在现有内容中找到指定章节的插入位置（章节末尾）
+        
+        Returns:
+            插入位置的字符索引，如果找不到章节返回 -1
+        """
+        # 查找章节标题
+        pattern = rf'\t- {re.escape(chapter_name)}\n\t  heading:: true'
+        match = re.search(pattern, content)
+        if not match:
+            return -1
+        
+        # 从章节开始位置向后查找，找到下一个同级章节或笔记结束
+        start_pos = match.end()
+        
+        # 查找下一个章节（以 \t- 开头且有 heading:: true）
+        next_chapter = re.search(r'\n\t- [^\n]+\n\t  heading:: true', content[start_pos:])
+        if next_chapter:
+            return start_pos + next_chapter.start()
+        
+        # 如果没有下一个章节，找到文件末尾的 -
+        end_marker = content.rfind('\n-')
+        if end_marker > start_pos:
+            return end_marker
+        
+        return len(content)
+
     def get_category_name(self, categories: List[Dict]) -> str:
         """从分类列表中获取分类名称"""
         if not categories:
@@ -126,12 +184,13 @@ class WeReadExporter:
             return f"{parts[0]}-{parts[-1]}"
         return title
 
-    def export_book(self, book: Dict) -> Optional[str]:
+    def export_book(self, book: Dict, merge: bool = False) -> Optional[str]:
         """
         导出单本书的笔记
         
         Args:
             book: 书籍信息
+            merge: 是否增量合并（只添加新内容）
             
         Returns:
             导出的文件路径，失败返回 None
@@ -208,7 +267,48 @@ class WeReadExporter:
             chapter_uid = bm.get("chapterUid", 0)
             chapter_bookmarks[chapter_uid].append(bm)
         
-        # 生成 Markdown 内容
+        # 保存文件
+        filename = self.sanitize_filename(f"{book_title}") + ".md"
+        filepath = os.path.join(self.output_dir, filename)
+        
+        # 如果是增量合并模式
+        if merge and os.path.exists(filepath):
+            existing_highlight_ids, existing_thought_ids = self.extract_existing_ids(filepath)
+            print(f"   ✓ 发现现有文件，已有 {len(existing_highlight_ids)} 条划线，{len(existing_thought_ids)} 条想法")
+            
+            # 过滤出新的划线和想法
+            new_bookmarks_count = 0
+            new_thoughts_count = 0
+            
+            # 生成新内容（只包含新的划线和想法）
+            new_content = self._generate_incremental_content(
+                book_id=book_id,
+                chapters=chapters,
+                chapter_bookmarks=chapter_bookmarks,
+                review_map=review_map,
+                thoughts_with_abstract=thoughts_with_abstract,
+                existing_highlight_ids=existing_highlight_ids,
+                existing_thought_ids=existing_thought_ids
+            )
+            
+            if new_content["highlights"] or new_content["thoughts"]:
+                # 读取现有文件
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+                
+                # 追加新内容到对应章节
+                updated_content = self._merge_content(existing_content, new_content, chapters)
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+                
+                print(f"   ✅ 增量更新: 新增 {new_content['new_highlights_count']} 条划线，{new_content['new_thoughts_count']} 条想法")
+            else:
+                print(f"   ℹ️ 没有新内容需要同步")
+            
+            return filepath
+        
+        # 全量导出模式
         md_content = self._generate_markdown(
             book_info=full_book_info,
             chapters=chapters,
@@ -217,10 +317,6 @@ class WeReadExporter:
             thoughts_with_abstract=thoughts_with_abstract,
             book_reviews=book_reviews
         )
-        
-        # 保存文件
-        filename = self.sanitize_filename(f"{book_title}") + ".md"
-        filepath = os.path.join(self.output_dir, filename)
         
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(md_content)
@@ -425,7 +521,179 @@ class WeReadExporter:
         
         return "\n".join(lines)
 
-    def export_by_title(self, title_keyword: str) -> Optional[str]:
+    def _generate_incremental_content(
+        self,
+        book_id: str,
+        chapters: List[Dict],
+        chapter_bookmarks: Dict[int, List[Dict]],
+        review_map: Dict[str, str],
+        thoughts_with_abstract: List[Dict],
+        existing_highlight_ids: set,
+        existing_thought_ids: set
+    ) -> Dict:
+        """
+        生成增量内容（只包含新的划线和想法）
+        
+        Returns:
+            包含新划线和想法的字典，按章节组织
+        """
+        result = {
+            "highlights": defaultdict(list),  # chapter_uid -> list of highlight strings
+            "thoughts": defaultdict(list),     # chapter_uid -> list of thought strings
+            "new_highlights_count": 0,
+            "new_thoughts_count": 0
+        }
+        
+        # 创建章节映射
+        chapter_map = {ch.get("chapterUid"): ch for ch in chapters}
+        
+        # 处理划线
+        for chapter_uid, bookmarks in chapter_bookmarks.items():
+            bookmarks.sort(key=lambda x: x.get("createTime", 0))
+            
+            for bm in bookmarks:
+                bookmark_id = bm.get("bookmarkId", "")
+                mark_text = bm.get("markText", "").strip()
+                create_time = bm.get("createTime", 0)
+                range_str = bm.get("range", "")
+                start, end = self.parse_range(range_str)
+                
+                if not mark_text:
+                    continue
+                
+                # 构建划线ID
+                highlight_id = f"{book_id}_{chapter_uid}_{start}-{end}"
+                
+                # 跳过已存在的划线
+                if highlight_id in existing_highlight_ids:
+                    continue
+                
+                # 生成划线内容
+                lines = []
+                lines.append(f"\t\t- {mark_text}")
+                lines.append(f"\t\t  划线id:: {highlight_id}")
+                
+                date_link = self.format_date_link(create_time)
+                if date_link:
+                    lines.append(f"\t\t  创建日期:: {date_link}")
+                
+                lines.append(f"\t\t  起始:: {start}")
+                lines.append(f"\t\t  结束:: {end}")
+                
+                # 如果有评论
+                note = review_map.get(bookmark_id, "")
+                if note:
+                    lines.append(f"> {note}")
+                
+                lines.append("")
+                
+                result["highlights"][chapter_uid].append("\n".join(lines))
+                result["new_highlights_count"] += 1
+        
+        # 处理想法
+        if thoughts_with_abstract:
+            for thought in thoughts_with_abstract:
+                thought_id = thought.get("reviewId", "")
+                
+                # 跳过已存在的想法
+                if thought_id and thought_id in existing_thought_ids:
+                    continue
+                
+                abstract = thought.get("abstract", "")
+                content = thought.get("content", "")
+                chapter_uid = thought.get("chapterUid", 0)
+                thought_time = thought.get("createTime", 0)
+                range_str = thought.get("range", "")
+                start, end = self.parse_range(range_str)
+                
+                if not (abstract and content):
+                    continue
+                
+                # 生成想法内容
+                lines = []
+                lines.append(f"\t\t- {abstract}")
+                lines.append(f"> {content}")
+                lines.append(f"")
+                if thought_id:
+                    lines.append(f"\t\t  想法id:: {thought_id}")
+                date_link = self.format_date_link(thought_time)
+                if date_link:
+                    lines.append(f"\t\t  创建日期:: {date_link}")
+                lines.append(f"\t\t  起始:: {start}")
+                lines.append(f"\t\t  结束:: {end}")
+                
+                result["thoughts"][chapter_uid].append("\n".join(lines))
+                result["new_thoughts_count"] += 1
+        
+        return result
+
+    def _merge_content(self, existing_content: str, new_content: Dict, chapters: List[Dict]) -> str:
+        """
+        将新内容合并到现有文件中
+        
+        Args:
+            existing_content: 现有文件内容
+            new_content: 新增内容（按章节组织）
+            chapters: 章节信息列表
+        
+        Returns:
+            合并后的内容
+        """
+        result = existing_content
+        
+        # 创建章节映射
+        chapter_map = {ch.get("chapterUid"): ch.get("title", "未知章节") for ch in chapters}
+        
+        # 合并所有有新内容的章节
+        all_chapter_uids = set(new_content["highlights"].keys())
+        all_chapter_uids.update(new_content["thoughts"].keys())
+        
+        for chapter_uid in all_chapter_uids:
+            chapter_name = chapter_map.get(chapter_uid, "未知章节")
+            highlights = new_content["highlights"].get(chapter_uid, [])
+            thoughts = new_content["thoughts"].get(chapter_uid, [])
+            
+            if not highlights and not thoughts:
+                continue
+            
+            # 构建要插入的内容
+            insert_content = ""
+            for h in highlights:
+                insert_content += h + "\n"
+            for t in thoughts:
+                insert_content += t + "\n"
+            
+            # 查找章节位置
+            # 先尝试精确匹配章节标题
+            chapter_pattern = rf'(\t- {re.escape(chapter_name)}\n\t  heading:: true\n)'
+            match = re.search(chapter_pattern, result)
+            
+            if match:
+                # 找到章节，在章节内容末尾插入
+                # 查找下一个章节或笔记块结束位置
+                start_pos = match.end()
+                
+                # 查找下一个同级章节
+                next_chapter = re.search(r'\n\t- [^\n]+\n\t  heading:: true', result[start_pos:])
+                if next_chapter:
+                    insert_pos = start_pos + next_chapter.start()
+                else:
+                    # 没有下一个章节，找到结尾的 -
+                    end_marker = result.rfind('\n-')
+                    insert_pos = end_marker if end_marker > start_pos else len(result)
+                
+                result = result[:insert_pos] + insert_content + result[insert_pos:]
+            else:
+                # 章节不存在，需要创建新章节
+                # 在 [[笔记]] 块的末尾添加新章节
+                end_marker = result.rfind('\n-')
+                if end_marker > 0:
+                    new_chapter = f"\t- {chapter_name}\n\t  heading:: true\n{insert_content}"
+                    result = result[:end_marker] + new_chapter + result[end_marker:]
+        
+        return result
+
+    def export_by_title(self, title_keyword: str, merge: bool = False) -> Optional[str]:
         """
         导出指定书名的书籍（模糊匹配）
         
@@ -466,7 +734,7 @@ class WeReadExporter:
         
         print(f"✅ 找到匹配书籍: 《{matched_book.get('book', {}).get('title', '')}》\n")
         
-        filepath = self.export_book(matched_book)
+        filepath = self.export_book(matched_book, merge=merge)
         
         if filepath:
             print("\n" + "=" * 60)
@@ -476,9 +744,12 @@ class WeReadExporter:
         
         return filepath
 
-    def export_all(self) -> List[str]:
+    def export_all(self, merge: bool = False) -> List[str]:
         """
         导出所有书籍的笔记
+        
+        Args:
+            merge: 是否增量合并（只添加新内容）
         
         Returns:
             导出的文件路径列表
@@ -505,7 +776,7 @@ class WeReadExporter:
             print(f"\n[{i}/{len(books)}] 处理中...")
             
             try:
-                filepath = self.export_book(book)
+                filepath = self.export_book(book, merge=merge)
                 if filepath:
                     exported_files.append(filepath)
                 
@@ -672,6 +943,8 @@ def main():
   python export_to_markdown.py --single           # 所有书合并为一个文件
   python export_to_markdown.py -o my_notes        # 指定输出目录
   python export_to_markdown.py --single -o ./     # 合并文件导出到当前目录
+  python export_to_markdown.py --merge -o /path/to/logseq/pages  # 增量同步到 Logseq
+  python export_to_markdown.py --book "人生的智慧" --merge       # 增量同步指定书籍
         """
     )
     
@@ -700,6 +973,12 @@ def main():
         help="只导出指定书名的书籍 (模糊匹配)"
     )
     
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="增量合并模式：只添加新的划线和想法，保留现有内容"
+    )
+    
     args = parser.parse_args()
     
     try:
@@ -707,11 +986,11 @@ def main():
         
         if args.book:
             # 只导出指定书籍
-            exporter.export_by_title(args.book)
+            exporter.export_by_title(args.book, merge=args.merge)
         elif args.single:
             exporter.export_single_file(output_file=args.filename)
         else:
-            exporter.export_all()
+            exporter.export_all(merge=args.merge)
             
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断导出")
