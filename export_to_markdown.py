@@ -74,6 +74,24 @@ class WeReadExporter:
             return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
         return ""
 
+    def format_date_link(self, timestamp: int) -> str:
+        """格式化时间戳为 Logseq 日期链接 (含星期)"""
+        if timestamp > 0:
+            dt = datetime.fromtimestamp(timestamp)
+            weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            weekday = weekdays[dt.weekday()]
+            return f"[[{dt.strftime('%Y-%m-%d')} {weekday}]]"
+        return ""
+
+    def parse_range(self, range_str: str) -> tuple:
+        """解析 range 字符串，返回 (start, end)"""
+        if not range_str:
+            return (0, 0)
+        parts = range_str.split("-")
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if len(parts) > 1 and parts[1] else start
+        return (start, end)
+
     def format_publish_date(self, publish_time: str) -> str:
         """格式化出版日期为 Logseq 格式 (YYYY-MM-DD Weekday)"""
         if not publish_time:
@@ -132,6 +150,10 @@ class WeReadExporter:
         else:
             full_book_info = book_info
         
+        # 确保 bookId 存在
+        if "bookId" not in full_book_info:
+            full_book_info["bookId"] = book_id
+        
         # 获取划线列表
         bookmarks = get_bookmark_list(book_id)
         if not bookmarks:
@@ -169,7 +191,9 @@ class WeReadExporter:
                     "abstract": abstract,
                     "content": content,
                     "chapterUid": chapter_uid,
-                    "createTime": review.get("createTime", 0)
+                    "createTime": review.get("createTime", 0),
+                    "reviewId": review.get("reviewId", ""),
+                    "range": review.get("range", "")
                 })
             elif bookmark_id and content:
                 # 关联划线的评论（没有单独的 abstract，用划线内容作为原文）
@@ -217,6 +241,7 @@ class WeReadExporter:
         lines = []
         
         # 提取书籍信息
+        book_id = book_info.get("bookId", "")
         book_title = book_info.get("title", "未知书名")
         author = book_info.get("author", "未知作者")
         translator = book_info.get("translator", "")
@@ -226,6 +251,7 @@ class WeReadExporter:
         publisher = book_info.get("publisher", "")
         publish_time = book_info.get("publishTime", "")
         categories = book_info.get("categories", [])
+        version = book_info.get("version", "")
         
         # 清理作者名
         author_clean = self.clean_author_name(author)
@@ -258,6 +284,12 @@ class WeReadExporter:
         lines.append(f"已读完:: 是")
         lines.append(f"来源:: [[微信读书]]")
         
+        if book_id:
+            lines.append(f"书籍id:: {book_id}")
+        
+        if version:
+            lines.append(f"版本:: {version}")
+        
         if cover:
             # 使用 Logseq 的图片宽度语法
             lines.append(f"封面:: ![]({cover}){{:width 80}}")
@@ -265,22 +297,32 @@ class WeReadExporter:
         lines.append("")  # 空行
         
         # ==================== 简介部分 ====================
-        lines.append("## [[简介]]")
-        lines.append("")
+        lines.append("- [[简介]]")
+        lines.append("  heading:: true")
+        lines.append("  部分:: 简介")
         if intro:
-            # 处理简介中的换行
-            intro_lines = intro.strip().split('\n')
-            for line in intro_lines:
-                if line.strip():
-                    lines.append(line.strip())
-            lines.append("")
+            # 处理简介中的换行，作为子项
+            intro_text = intro.strip().replace('\n', ' ')
+            lines.append(f"\t- {intro_text}")
         else:
-            lines.append("暂无简介")
-            lines.append("")
+            lines.append("\t- 暂无简介")
+        
+        # ==================== 读后感部分（如果有）====================
+        if book_reviews:
+            lines.append("- ## [[读后感]]")
+            for review in book_reviews:
+                content = review.get("content", "")
+                if content:
+                    # 书评可能很长，按段落处理
+                    paragraphs = content.strip().split('\n')
+                    for para in paragraphs:
+                        if para.strip():
+                            lines.append(f"\t- {para.strip()}")
         
         # ==================== 笔记部分 ====================
-        lines.append("## [[笔记]]")
-        lines.append("")
+        lines.append("- [[笔记]]")
+        lines.append("  heading:: true")
+        lines.append("  部分:: 笔记")
         
         # 创建章节 UID 到信息的映射
         chapter_map = {ch.get("chapterUid"): ch for ch in chapters}
@@ -318,24 +360,39 @@ class WeReadExporter:
             
             chapter_name = self.get_chapter_name(chapters, chapter_uid)
             
-            # 章节标题
-            lines.append(f"### {chapter_name}")
-            lines.append("")
+            # 章节标题（作为笔记的子项）
+            lines.append(f"\t- {chapter_name}")
+            lines.append(f"\t  heading:: true")
             
             # 按时间排序划线
             bookmarks.sort(key=lambda x: x.get("createTime", 0))
             
             for bm in bookmarks:
-                bookmark_id = bm.get("bookmarkId")
+                bookmark_id = bm.get("bookmarkId", "")
                 mark_text = bm.get("markText", "").strip()
+                create_time = bm.get("createTime", 0)
+                range_str = bm.get("range", "")
+                start, end = self.parse_range(range_str)
                 
                 if not mark_text:
                     continue
                 
-                # 划线内容（使用 * 开头）
-                lines.append(f"* {mark_text}")
+                # 划线内容
+                lines.append(f"\t\t- {mark_text}")
                 
-                # 如果有评论/笔记（使用 > 格式）
+                # 添加属性
+                # 构建划线id: {bookId}_{chapterUid}_{start}-{end}
+                highlight_id = f"{book_id}_{chapter_uid}_{start}-{end}"
+                lines.append(f"\t\t  划线id:: {highlight_id}")
+                
+                date_link = self.format_date_link(create_time)
+                if date_link:
+                    lines.append(f"\t\t  创建日期:: {date_link}")
+                
+                lines.append(f"\t\t  起始:: {start}")
+                lines.append(f"\t\t  结束:: {end}")
+                
+                # 如果有评论/笔记（使用 > 格式，放在属性之前作为子块）
                 note = review_map.get(bookmark_id, "")
                 if note:
                     lines.append(f"> {note}")
@@ -346,26 +403,25 @@ class WeReadExporter:
             for thought in chapter_thoughts:
                 abstract = thought.get("abstract", "")
                 content = thought.get("content", "")
+                thought_time = thought.get("createTime", 0)
+                thought_id = thought.get("reviewId", "")
+                range_str = thought.get("range", "")
+                start, end = self.parse_range(range_str)
+                
                 if abstract and content:
-                    lines.append(f"* {abstract}")
+                    # 想法格式：原文在前，想法内容用 > 引用
+                    lines.append(f"\t\t- {abstract}")
                     lines.append(f"> {content}")
-                    lines.append("")
-            
-            lines.append("")
+                    lines.append(f"")
+                    if thought_id:
+                        lines.append(f"\t\t  想法id:: {thought_id}")
+                    date_link = self.format_date_link(thought_time)
+                    if date_link:
+                        lines.append(f"\t\t  创建日期:: {date_link}")
+                    lines.append(f"\t\t  起始:: {start}")
+                    lines.append(f"\t\t  结束:: {end}")
         
-        # 添加书评/读后感（放在最后）
-        if book_reviews:
-            lines.append("### 读后感")
-            lines.append("")
-            for review in book_reviews:
-                content = review.get("content", "")
-                if content:
-                    # 书评可能很长，按段落处理
-                    paragraphs = content.strip().split('\n')
-                    for para in paragraphs:
-                        if para.strip():
-                            lines.append(para.strip())
-                    lines.append("")
+        lines.append("-")  # 结尾空块
         
         return "\n".join(lines)
 
